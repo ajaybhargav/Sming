@@ -26,6 +26,19 @@ SPI_MODE ?= qio
 # SPI_SIZE: 512K, 256K, 1M, 2M, 4M
 SPI_SIZE ?= 512K
 
+# Path to spiffy
+SPIFFY ?= $(SMING_HOME)/spiffy/spiffy
+
+#ESPTOOL2 config to generate rBootLESS images
+IMAGE_MAIN	?= 0x00000.bin
+IMAGE_SDK	?= 0x09000.bin
+# esptool2 path
+ESPTOOL2 ?= esptool2
+# esptool2 parameters for rBootLESS images
+ESPTOOL2_SECTS		?= .text .data .rodata
+ESPTOOL2_MAIN_ARGS	?= -quiet -bin -boot0
+ESPTOOL2_SDK_ARGS	?= -quiet -lib
+
 ## ESP_HOME sets the path where ESP tools and SDK are located.
 ## Windows:
 # ESP_HOME = c:/Espressif
@@ -120,16 +133,16 @@ TARGET		= app
 
 # which modules (subdirectories) of the project to include in compiling
 # define your custom directories in the project's own Makefile before including this one
-MODULES 	?= app  # if not initialized by user 
-MODULES		+= $(SMING_HOME)/appinit
-EXTRA_INCDIR    ?= include $(SMING_HOME)/include $(SMING_HOME)/ $(SMING_HOME)/system/include $(SMING_HOME)/Wiring $(SMING_HOME)/Libraries $(SMING_HOME)/SmingCore $(SDK_BASE)/../include
+MODULES      ?= app     # default to app if not set by user
+EXTRA_INCDIR ?= include # default to include if not set by user
+EXTRA_INCDIR += $(SMING_HOME)/include $(SMING_HOME)/ $(SMING_HOME)/system/include $(SMING_HOME)/Wiring $(SMING_HOME)/Libraries $(SMING_HOME)/SmingCore $(SDK_BASE)/../include $(SMING_HOME)/rboot $(SMING_HOME)/rboot/appcode
 
 # libraries used in this project, mainly provided by the SDK
 USER_LIBDIR = $(SMING_HOME)/compiler/lib/
-LIBS		= microc microgcc hal phy pp net80211 lwip wpa main sming $(EXTRA_LIBS)
+LIBS		= microc microgcc hal phy pp net80211 lwip wpa main sming crypto pwm smartconfig $(EXTRA_LIBS)
 
 # compiler flags using during compilation of source files
-CFLAGS		= -Os -g -Wpointer-arith -Wundef -Werror -Wl,-EL -nostdlib -mlongcalls -mtext-section-literals -finline-functions -fdata-sections -ffunction-sections -D__ets__ -DICACHE_FLASH -DARDUINO=106
+CFLAGS		= -Os -g -Wpointer-arith -Wundef -Werror -Wl,-EL -nostdlib -mlongcalls -mtext-section-literals -finline-functions -fdata-sections -ffunction-sections -D__ets__ -DICACHE_FLASH -DARDUINO=106 $(USER_CFLAGS)
 CXXFLAGS	= $(CFLAGS) -fno-rtti -fno-exceptions -std=c++11 -felide-constructors
 
 # we will use global WiFi settings from Eclipse Environment Variables, if possible
@@ -154,54 +167,40 @@ LD_SCRIPT	= $(LD_PATH)eagle.app.v6.cpp.ld
 
 ifeq ($(SPI_SPEED), 26)
 	flashimageoptions = -ff 26m
+else ifeq ($(SPI_SPEED), 20)
+	flashimageoptions = -ff 20m
+else ifeq ($(SPI_SPEED), 80)
+	flashimageoptions = -ff 80m
 else
-    ifeq ($(SPI_SPEED), 20)
-        flashimageoptions = -ff 20m
-    else
-        ifeq ($(SPI_SPEED), 80)
-		flashimageoptions = -ff 80m
-        else
-		flashimageoptions = -ff 40m
-        endif
-    endif
+	flashimageoptions = -ff 40m
 endif
 
 ifeq ($(SPI_MODE), qout)
 	flashimageoptions += -fm qout
-else
-    ifeq ($(SPI_MODE), dio)
+else ifeq ($(SPI_MODE), dio)
 	flashimageoptions += -fm dio
-    else
-        ifeq ($(SPI_MODE), dout)
-		flashimageoptions += -fm dout
-        else
-		flashimageoptions += -fm qio
-        endif
-    endif
+else ifeq ($(SPI_MODE), dout)
+	flashimageoptions += -fm dout
+else
+	flashimageoptions += -fm qio
 endif
 
 # flash larger than 1024KB only use 1024KB to storage user1.bin and user2.bin
 ifeq ($(SPI_SIZE), 256K)
 	flashimageoptions += -fs 2m
 	SPIFF_SIZE ?= 131072  #128K
-else
-    ifeq ($(SPI_SIZE), 1M)
+else ifeq ($(SPI_SIZE), 1M)
 	flashimageoptions += -fs 8m
 	SPIFF_SIZE ?= 524288  #512K
-    else
-        ifeq ($(SPI_SIZE), 2M)
-		flashimageoptions += -fs 16m
-		SPIFF_SIZE ?= 524288  #512K
-        else
-            ifeq ($(SPI_SIZE), 4M)
-			flashimageoptions += -fs 32m
-			SPIFF_SIZE ?= 524288  #512K
-            else
-			flashimageoptions += -fs 4m
-			SPIFF_SIZE ?= 262144  #256K
-            endif
-        endif
-    endif
+else ifeq ($(SPI_SIZE), 2M)
+	flashimageoptions += -fs 16m
+	SPIFF_SIZE ?= 524288  #512K
+else ifeq ($(SPI_SIZE), 4M)
+	flashimageoptions += -fs 32m
+	SPIFF_SIZE ?= 524288  #512K
+else
+	flashimageoptions += -fs 4m
+	SPIFF_SIZE ?= 196608  #192K
 endif
 
 # various paths from the SDK used in this project
@@ -232,7 +231,8 @@ LIBS		:= $(addprefix -l,$(LIBS))
 APP_AR		:= $(addprefix $(BUILD_BASE)/,$(TARGET)_app.a)
 TARGET_OUT	:= $(addprefix $(BUILD_BASE)/,$(TARGET).out)
 
-SPIFF_BIN_OUT := $(FW_BASE)/spiff_rom.bin
+SPIFF_BIN_OUT ?= spiff_rom
+SPIFF_BIN_OUT := $(FW_BASE)/$(SPIFF_BIN_OUT).bin
 LD_SCRIPT	:= $(addprefix -T,$(LD_SCRIPT))
 
 INCDIR	:= $(addprefix -I,$(SRC_DIR))
@@ -280,7 +280,7 @@ $(TARGET_OUT): $(APP_AR)
 	
 	$(Q) $(MEMANALYZER) $@ > $(FW_MEMINFO_NEW)
 	
-	$(Q) if [[ -f "$(FW_MEMINFO_NEW)" && -f "$(FW_MEMINFO_OLD)" ]]; then \
+	$(Q) if [ -f "$(FW_MEMINFO_NEW)" -a -f "$(FW_MEMINFO_OLD)" ]; then \
 	  awk -F "|" 'FILENAME == "$(FW_MEMINFO_OLD)" { arr[$$1]=$$5 } FILENAME == "$(FW_MEMINFO_NEW)" { if (arr[$$1] != $$5){printf "%s%s%+d%s", substr($$0, 1, length($$0) - 1)," (",$$5 - arr[$$1],")\n" } else {print $$0} }' $(FW_MEMINFO_OLD) $(FW_MEMINFO_NEW); \
 	elif [ -f "$(FW_MEMINFO_NEW)" ]; then \
 	  cat $(FW_MEMINFO_NEW); \
@@ -288,7 +288,9 @@ $(TARGET_OUT): $(APP_AR)
 
 	$(vecho) "------------------------------------------------------------------------------"
 	$(vecho) "# Generating image..."
-	$(Q) $(ESPTOOL) elf2image $@ $(flashimageoptions) -o $(FW_BASE)/
+#	$(Q) $(ESPTOOL2) elf2image $@ $(flashimageoptions) -o $(FW_BASE)/
+	@$(ESPTOOL2) $(ESPTOOL2_MAIN_ARGS) $@ $(FW_BASE)/$(IMAGE_MAIN) $(ESPTOOL2_SECTS)
+	@$(ESPTOOL2) $(ESPTOOL2_SDK_ARGS) $@ $(FW_BASE)/$(IMAGE_SDK)
 	$(vecho) "Generate firmware images successully in folder $(FW_BASE)."
 	$(vecho) "Done"
 
@@ -315,15 +317,14 @@ else
 	# Generating spiffs_bin
 	$(vecho) "Checking for spiffs files"
 	$(Q) if [ -d "$(SPIFF_FILES)" ]; then \
-    	echo "$(SPIFF_FILES) directory exists. Creating spiff_rom.bin"; \
-    	spiffy $(SPIFF_SIZE) $(SPIFF_FILES); \
-    	mv spiff_rom.bin $(FW_BASE)/spiff_rom.bin; \
+		echo "$(SPIFF_FILES) directory exists. Creating $(SPIFF_BIN_OUT)"; \
+		$(SPIFFY) $(SPIFF_SIZE) $(SPIFF_FILES) $(SPIFF_BIN_OUT); \
 	else \
-    	echo "No files found in ./$(SPIFF_FILES)."; \
-    	echo "Creating empty spiff_rom.bin ($$($(GET_FILESIZE) $(SMING_HOME)/compiler/data/blankfs.bin) bytes)"; \
-    cp $(SMING_HOME)/compiler/data/blankfs.bin $(FW_BASE)/spiff_rom.bin; \
+		echo "No files found in ./$(SPIFF_FILES)."; \
+		echo "Creating empty $(SPIFF_BIN_OUT)"; \
+		$(SPIFFY) $(SPIFF_SIZE) dummy.dir $(SPIFF_BIN_OUT); \
 	fi
-	$(vecho) "spiff_rom.bin---------->$(SPIFF_START_OFFSET)"
+	$(vecho) "$(SPIFF_BIN_OUT)---------->$(SPIFF_START_OFFSET)"
 endif
 
 flash: all
@@ -332,7 +333,7 @@ flash: all
 ifeq ($(DISABLE_SPIFFS), 1)
 	$(ESPTOOL) -p $(COM_PORT) -b $(COM_SPEED_ESPTOOL) write_flash $(flashimageoptions) 0x00000 $(FW_BASE)/0x00000.bin 0x09000 $(FW_BASE)/0x09000.bin
 else
-	$(ESPTOOL) -p $(COM_PORT) -b $(COM_SPEED_ESPTOOL) write_flash $(flashimageoptions) 0x00000 $(FW_BASE)/0x00000.bin 0x09000 $(FW_BASE)/0x09000.bin $(SPIFF_START_OFFSET) $(FW_BASE)/spiff_rom.bin
+	$(ESPTOOL) -p $(COM_PORT) -b $(COM_SPEED_ESPTOOL) write_flash $(flashimageoptions) 0x00000 $(FW_BASE)/0x00000.bin 0x09000 $(FW_BASE)/0x09000.bin $(SPIFF_START_OFFSET) $(SPIFF_BIN_OUT)
 endif
 	$(TERMINAL)
 
